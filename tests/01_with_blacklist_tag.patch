@@ -1,0 +1,10 @@
+diff --git a/lazy-patcher-dont-update b/lazy-patcher-dont-update
+new file mode 100644
+index 0000000..e69de29
+diff --git a/test/file b/test/file
+new file mode 100644
+index 0000000..12f00e9
+--- /dev/null
++++ b/test/file
+@@ -0,0 +1 @@
++contents

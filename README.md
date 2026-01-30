@@ -16,7 +16,9 @@ monitoring and merging upstream changes to stay in sync...
 
 This plugin addresses this issue by automatically saving changes in all
 installed plugins through git commands, reverting them before Lazy starts its
-lazy magic, and reapplying them afterwards.
+lazy magic, and reapplying them afterwards. Similar to polirritmico's
+[lazy-local-patcher](https://github.com/polirritmico/lazy-local-patcher.nvim),
+but everything is completely automatic.
 
 <!-- panvimdoc-ignore-start -->
 
@@ -90,6 +92,9 @@ local defaults = {
   apply_patches = true, -- Apply changes from existing patches if there were none before
   confirm_mass_changes = true, -- Ask confirmation before triggering mass changes from command
   print_logs = true, -- Print log messages while applying changes
+  whitelist = nil, -- List of only plugins to auto-update
+  blacklist = nil, -- List of plugins to omit from auto-update
+  blacklist_tags = { "lazy-patcher-dont-update" }, -- Skip auto-update if this file exist in repo
 }
 ```
 

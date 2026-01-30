@@ -5,6 +5,8 @@ local log = require("lazy-patcher.logger")
 local M = {}
 
 ---@class LazyPatcher.Options
+---@field whitelist string[]?
+---@field blacklist string[]?
 local defaults = {
   lazy_path = vim.fn.stdpath("data") .. "/lazy", -- Directory where lazy install the plugins
   patches_path = vim.fn.stdpath("config") .. "/patches", -- Directory where patch files are stored
@@ -12,6 +14,9 @@ local defaults = {
   apply_patches = true, -- Apply changes from existing patches if there were none before
   confirm_mass_changes = true, -- Ask confirmation before triggering mass changes from command
   print_logs = true, -- Print log messages while applying changes
+  whitelist = nil, -- List of only plugins to auto-update
+  blacklist = nil, -- List of plugins to omit from auto-update
+  blacklist_tags = { "lazy-patcher-dont-update" }, -- Skip auto-update if this file exist in repo
 }
 
 ---@param path string

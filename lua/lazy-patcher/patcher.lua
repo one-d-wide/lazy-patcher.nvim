@@ -28,17 +28,6 @@ function M.patch_spec_from_repo(opts, plugin_name)
   }
 end
 
----@param opts LazyPatcher.Options
----@param patch_name string
----@return LazyPatcher.PatchSpec?
-function M.patch_spec_from_patch(opts, patch_name)
-  local plugin_name = patch_name:match("^(.*)%.patch$", 1)
-  if plugin_name == nil then
-    return
-  end
-  return M.patch_spec_from_repo(opts, plugin_name)
-end
-
 ---@param repo_path string
 ---@param sub_command string[]
 function M.git_execute(repo_path, sub_command)
@@ -211,6 +200,10 @@ function M.apply_patch_file(opts, spec)
     s:log("There were changes detected in repository `%s`", spec.plugin_name)
     s:log("But no patch guard exist. Refusing to proceed")
     s:advice("Likely caused by an unclean shutdown followed by a modification.")
+    s:advice("Usually no action is needed, error will go away after next restore.")
+    s:advice("Otherwise, you could try:")
+    s:advice("- Checking changes in `%s`", spec.plugin_path)
+    s:advice("- And comparing them against `%s`", spec.patch_path)
     return
   end
 
@@ -234,14 +227,46 @@ function M.apply_patch_file(opts, spec)
 end
 
 ---@param opts LazyPatcher.Options
+---@param plugin_name string
+---@return string?
+function M.is_skipped_reason(opts, plugin_name)
+  if opts.whitelist ~= nil and not vim.list_contains(opts.whitelist, plugin_name) then
+    return "not in whitelist"
+  end
+
+  if opts.blacklist ~= nil and vim.list_contains(opts.blacklist, plugin_name) then
+    return "in blacklist"
+  end
+
+  for _, blacklist_tag in ipairs(opts.blacklist_tags) do
+    if vim.uv.fs_stat(vim.fs.joinpath(opts.lazy_path, plugin_name, blacklist_tag)) ~= nil then
+      return string.format("repo has blacklist tag `%s`", blacklist_tag)
+    end
+  end
+end
+
+---@param opts LazyPatcher.Options
+---@param plugin_name string
+---@return boolean?
+function M.do_skip(opts, plugin_name)
+  local skip_reason = M.is_skipped_reason(opts, plugin_name)
+  if skip_reason ~= nil then
+    log.scope("Skipping `%s` (%s)", plugin_name, skip_reason):set_ok()
+    return true
+  end
+end
+
+---@param opts LazyPatcher.Options
 ---@return boolean?
 function M.apply_all(opts)
   -- Apply changes from the patch if there were none (e.g. after a fresh install)
   if opts.apply_patches and opts.update_patches then
     for patch_name in vim.fs.dir(opts.patches_path) do
-      local spec = M.patch_spec_from_patch(opts, patch_name)
-      if spec ~= nil then
-        M.apply_patch_file(opts, spec)
+      local plugin_name = patch_name:match("^(.*)%.patch$", 1)
+      if plugin_name ~= nil then
+        if not M.do_skip(opts, plugin_name) then
+          M.apply_patch_file(opts, M.patch_spec_from_repo(opts, plugin_name))
+        end
       end
     end
   end
@@ -250,12 +275,13 @@ function M.apply_all(opts)
   for patch in vim.fs.dir(opts.patches_path) do
     local plugin_name = patch:match("^(.*)%.patch.guard$", 1)
     if plugin_name ~= nil then
-      M.apply(opts, M.patch_spec_from_repo(opts, plugin_name))
+      if not M.do_skip(opts, plugin_name) then
+        M.apply(opts, M.patch_spec_from_repo(opts, plugin_name))
+      end
     end
   end
 
   log.scope("Done applying patches"):set_ok()
-  log.trace("Done applying patches")
   return true
 end
 
@@ -264,16 +290,16 @@ end
 function M.restore_all(opts)
   for plugin_name, _ in vim.fs.dir(opts.lazy_path) do
     if vim.uv.fs_stat(vim.fs.joinpath(opts.lazy_path, plugin_name, ".git/")) ~= nil then
-      local spec = M.patch_spec_from_repo(opts, plugin_name)
-
-      if M.check_changed(opts, spec) then
-        M.restore(opts, spec)
+      if not M.do_skip(opts, plugin_name) then
+        local spec = M.patch_spec_from_repo(opts, plugin_name)
+        if M.check_changed(opts, spec) then
+          M.restore(opts, spec)
+        end
       end
     end
   end
 
   log.scope("Done stashing patches"):set_ok()
-  log.trace("Done stashing patches")
   return true
 end
 

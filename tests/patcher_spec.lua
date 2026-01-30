@@ -29,6 +29,27 @@ local get_buf = function(delim)
   return table.concat(contents, delim or " ")
 end
 
+local function assert_log_not_matches(pat)
+  for _, log in ipairs(require("lazy-patcher.logger").logs) do
+    if string.match(log.short, pat) ~= nil then
+      vim.cmd("LazyPatcher")
+      vim.cmd("w!" .. log_path)
+      error(string.format("Found in the logs: `%s`: `%s`. See headlines in %s", pat, log.short, log_path))
+    end
+  end
+end
+
+local function assert_log_eq(expected)
+  for _, log in ipairs(require("lazy-patcher.logger").logs) do
+    if log.short == expected then
+      return
+    end
+  end
+  vim.cmd("LazyPatcher")
+  vim.cmd("w!" .. log_path)
+  error(string.format("Not found in the logs: `%s`. See headlines in %s", expected, log_path))
+end
+
 local function check_errors()
   vim.cmd("LazyPatcher")
   vim.cmd("w!" .. log_path)
@@ -204,6 +225,126 @@ describe("simple", function()
     empty_repo:assert_no_stashes()
     empty_repo:assert_empty()
 
+    repo:assert_matches_patch(test_file("00.patch"))
+  end)
+end)
+
+describe("whitelist", function()
+  before_each(function()
+    vim.system({ "rm", "-rf", lazy_path, patches_path }):wait()
+    assert_not_exists(lazy_path)
+    assert_not_exists(patches_path)
+    system("mkdir -p %s %s", lazy_path, patches_path)
+  end)
+
+  it("setup", function()
+    require("lazy-patcher").setup({
+      confirm_mass_changes = false,
+      print_logs = false,
+      whitelist = { "allowed_repo" },
+    })
+  end)
+
+  after_each(function()
+    check_errors()
+    require("lazy-patcher.logger").clear()
+  end)
+
+  it("All", function()
+    local repo = git_repo_create("test_repo")
+    repo:commit_empty():apply_patch(test_file("00.patch"))
+
+    local allowed_repo = git_repo_create("allowed_repo")
+    allowed_repo:commit_empty():apply_patch(test_file("00.patch"))
+
+    vim.cmd("LazyPatcherRestoreAll")
+    check_errors()
+    assert_log_eq("Skipping `test_repo` (not in whitelist)")
+
+    repo:assert_no_stashes()
+    repo:assert_matches_patch(test_file("00.patch"))
+
+    allowed_repo:assert_empty()
+    allowed_repo:assert_latest_stash_matches(test_file("00.patch"))
+
+    assert_not_exists(patch_file("test_repo.patch.guard"))
+    assert_contents_match(patch_file("allowed_repo.patch.guard"), test_file("00.patch"))
+
+    require("lazy-patcher.logger").clear()
+    vim.cmd("LazyPatcherApplyAll")
+    check_errors()
+    assert_log_not_matches("Skipping")
+
+    repo:assert_no_stashes()
+    repo:assert_matches_patch(test_file("00.patch"))
+
+    allowed_repo:assert_no_stashes()
+    allowed_repo:assert_matches_patch(test_file("00.patch"))
+  end)
+end)
+
+describe("blacklist", function()
+  before_each(function()
+    vim.system({ "rm", "-rf", lazy_path, patches_path }):wait()
+    assert_not_exists(lazy_path)
+    assert_not_exists(patches_path)
+    system("mkdir -p %s %s", lazy_path, patches_path)
+  end)
+
+  it("setup", function()
+    require("lazy-patcher").setup({
+      confirm_mass_changes = false,
+      print_logs = false,
+      blacklist = { "denied_repo" },
+    })
+  end)
+
+  after_each(function()
+    check_errors()
+    require("lazy-patcher.logger").clear()
+  end)
+
+  it("All", function()
+    local denied_repo = git_repo_create("denied_repo")
+    denied_repo:commit_empty():apply_patch(test_file("00.patch"))
+
+    local tagged_repo = git_repo_create("tagged_repo")
+    tagged_repo:commit_empty():apply_patch(test_file("01_with_blacklist_tag.patch"))
+
+    local repo = git_repo_create("test_repo")
+    repo:commit_empty():apply_patch(test_file("00.patch"))
+
+    vim.cmd("LazyPatcherRestoreAll")
+    check_errors()
+    assert_log_eq("Skipping `denied_repo` (in blacklist)")
+    assert_log_eq("Skipping `tagged_repo` (repo has blacklist tag `lazy-patcher-dont-update`)")
+    assert_log_eq("Stashing `test_repo`")
+
+    denied_repo:assert_no_stashes()
+    denied_repo:assert_matches_patch(test_file("00.patch"))
+
+    tagged_repo:assert_no_stashes()
+    tagged_repo:assert_matches_patch(test_file("01_with_blacklist_tag.patch"))
+
+    repo:assert_empty()
+    repo:assert_latest_stash_matches(test_file("00.patch"))
+
+    assert_not_exists(patch_file("denied_repo.patch.guard"))
+    assert_not_exists(patch_file("tagged_repo.patch.guard"))
+    assert_contents_match(patch_file("test_repo.patch.guard"), test_file("00.patch"))
+
+    require("lazy-patcher.logger").clear()
+    vim.cmd("LazyPatcherApplyAll")
+    check_errors()
+    assert_log_not_matches("Skipping")
+
+    denied_repo:assert_no_stashes()
+    denied_repo:assert_matches_patch(test_file("00.patch"))
+
+    tagged_repo:assert_no_stashes()
+    tagged_repo:assert_matches_patch(test_file("01_with_blacklist_tag.patch"))
+
+    repo:assert_no_stashes()
     repo:assert_matches_patch(test_file("00.patch"))
   end)
 end)
