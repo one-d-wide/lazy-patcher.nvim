@@ -1,7 +1,7 @@
 local log = require("lazy-patcher.logger")
 
 ---@class LazyPatcher.Main
----@field logs LazyPatcher.LogEvent[]
+---@field tmp_file string?
 local M = {}
 
 ---@class LazyPatcher.PatchSpec
@@ -31,21 +31,100 @@ end
 ---@param repo_path string
 ---@param sub_command string[]
 function M.git_execute(repo_path, sub_command)
-  local command = { "git", "-C", repo_path, unpack(sub_command) }
-  local command_output = vim.fn.system(command)
-  if vim.v.shell_error ~= 0 then
-    return { success = false, output = command_output }
-  end
-  return { success = true, output = command_output }
+  local command = vim.list_extend({ "git", "-C", repo_path }, sub_command)
+  local output = vim.fn.system(command)
+  return { success = vim.v.shell_error == 0, output = output }
 end
 
 local git = {
   apply = "apply -v",
-  status_short = "status --short",
+  status_short = "status --null --short",
   stash_pop = "stash pop",
   stash_push = "stash push --include-untracked",
   stash_show = "stash show --include-untracked --patch",
+  config_excludes_file = "config get --null --default= core.excludesFile",
 }
+
+function list_tbl_flatten_strings(t)
+  local f = function(stack)
+    ::retry::
+    if #stack == 0 then
+      return
+    end
+
+    local t = stack[#stack]
+    local k, v = next(t[1], t[2])
+    if k == nil then
+      table.remove(stack)
+      goto retry
+    end
+    t[2] = k
+
+    if type(v) == "table" then
+      table.insert(stack, { v, nil })
+      goto retry
+    end
+
+    return v
+  end
+  return f, { { t, nil } }
+end
+
+---@param opts LazyPatcher.Options
+---@param spec LazyPatcher.PatchSpec
+---@return string?
+function M.extra_excludes_file(opts, spec)
+  local resp = M.git_execute(spec.plugin_path, vim.split(git.config_excludes_file, " "))
+  if not resp.success then
+    local s = log.scope("Checking `%s`", spec.plugin_name)
+    s:log("Error checking the repository: `%s`", spec.plugin_path)
+    s:log("(Output of `git %s`)", git.config_excludes_file)
+    s:raw(resp.output)
+    return
+  end
+
+  local lines = ""
+  local excludes_path = resp.output:sub(1, #resp.output - 1)
+  if excludes_path ~= "" then
+    local file, err = io.open(excludes_path, "rb")
+    if err == nil then
+      assert(file ~= nil)
+      lines, err = file:read("a")
+      file:close()
+    end
+    if err ~= nil then
+      local s = log.scope("Checking `%s`", spec.plugin_name)
+      s:log("Error reading core.excludesFile `%s`: %s", excludes_path, err)
+      -- git doesn't abort here
+    end
+  end
+
+  if M.tmp_file == nil then
+    M.tmp_file = os.tmpname()
+    vim.api.nvim_create_autocmd("VimLeave", {
+      callback = function()
+        os.remove(M.tmp_file)
+      end,
+      once = true,
+    })
+  end
+
+  local file, err = io.open(M.tmp_file, "wb")
+  if err ~= nil then
+    log.scope("Error writing temp file `%s` :%s", M.tmp_file, err)
+    return
+  end
+  assert(file ~= nil)
+
+  for line in list_tbl_flatten_strings(opts.extra_gitignore) do
+    lines = lines .. "\n" .. line
+  end
+
+  file:write(lines)
+  file:close()
+
+  return M.tmp_file
+end
 
 ---@param opts LazyPatcher.Options
 ---@param spec LazyPatcher.PatchSpec
@@ -65,7 +144,12 @@ function M.restore(opts, spec)
   end
 
   -- Save stash
-  local resp = M.git_execute(spec.plugin_path, vim.split(git.stash_push, " "))
+  local file_name = M.extra_excludes_file(opts, spec)
+  if file_name == nil then
+    return
+  end
+  local stash_push_args = vim.list_extend({ "-c", "core.excludesFile=" .. file_name }, vim.split(git.stash_push, " "))
+  local resp = M.git_execute(spec.plugin_path, stash_push_args)
   if not resp.success then
     s:log("Error stashing the repository: `%s`", spec.plugin_path)
     s:log("(Output of `git %s`)", git.stash_push)
@@ -164,7 +248,12 @@ end
 ---@return boolean?
 ---@diagnostic disable-next-line: unused-local
 function M.check_changed(opts, spec)
-  local resp = M.git_execute(spec.plugin_path, vim.split(git.status_short, " "))
+  local file_name = M.extra_excludes_file(opts, spec)
+  if file_name == nil then
+    return
+  end
+  local status_args = vim.list_extend({ "-c", "core.excludesFile=" .. file_name }, vim.split(git.status_short, " "))
+  local resp = M.git_execute(spec.plugin_path, status_args)
   if not resp.success then
     local s = log.scope("Checking `%s`", spec.plugin_name)
     s:log("Failed to obtain changes:")
@@ -172,7 +261,8 @@ function M.check_changed(opts, spec)
     s:raw(resp.output)
     return
   end
-  for line in vim.gsplit(resp.output, "\n") do
+
+  for line in vim.gsplit(resp.output, "\0") do
     local changes = line:sub(1, 2)
     if changes:len() == 2 and changes ~= "  " and changes ~= "!!" then
       return true
@@ -238,7 +328,7 @@ function M.is_skipped_reason(opts, plugin_name)
     return "in blacklist"
   end
 
-  for _, blacklist_tag in ipairs(opts.blacklist_tags) do
+  for blacklist_tag in list_tbl_flatten_strings(opts.blacklist_tags) do
     if vim.uv.fs_stat(vim.fs.joinpath(opts.lazy_path, plugin_name, blacklist_tag)) ~= nil then
       return string.format("repo has blacklist tag `%s`", blacklist_tag)
     end

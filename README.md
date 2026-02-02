@@ -94,7 +94,8 @@ local defaults = {
   print_logs = true, -- Print log messages while applying changes
   whitelist = nil, -- List of only plugins to auto-update
   blacklist = nil, -- List of plugins to omit from auto-update
-  blacklist_tags = { "lazy-patcher-dont-update" }, -- Skip auto-update if this file exist in repo
+  blacklist_tags = { defaults = { "lazy-patcher-dont-update" } }, -- Skip auto-update if this file exist in repo
+  extra_gitignore = { defaults = { "/doc/tags" } }, -- Extra gitignore entries
 }
 ```
 

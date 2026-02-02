@@ -19,7 +19,7 @@ local function system(cmd, ...)
   end
   local res = vim.system(cmd):wait()
   if res.code ~= 0 or res.signal ~= 0 then
-    error("Command failed: " .. table.concat(cmd, " ") .. "\n" .. res.stderr)
+    error("Command failed: " .. table.concat(cmd, " ") .. "\n" .. res.stdout .. res.stderr)
   end
   return vim.trim(res.stdout)
 end
@@ -69,7 +69,7 @@ local function copy_file(left, right)
 end
 
 local function assert_contents_match(left, right)
-  system("cmp %s %s", left, right)
+  system("diff %s %s", left, right)
 end
 
 local function assert_exists(path)
@@ -110,32 +110,32 @@ local function git_repo_create(name)
       return self
     end,
     apply_patch = function(self, patch_path)
-      git("status -su | cmp /dev/null")
+      git("status -su | diff - /dev/null")
       git("apply --no-index <'%s'", patch_path)
       return self
     end,
     commit_everything = function(self)
       git("add .")
       git("commit -m commit_everything")
-      git("status -s | cmp /dev/null")
+      git("status -s | diff - /dev/null")
       return self
     end,
     assert_empty = function(self)
-      git("status -s | cmp /dev/null")
+      git("status -s | diff - /dev/null")
       return self
     end,
     assert_no_stashes = function(self)
-      git("stash list | cmp /dev/null")
+      git("stash list | diff - /dev/null")
       return self
     end,
     assert_matches_patch = function(self, patch_path)
       git("add .")
-      git("diff --cached | cmp %s", patch_path)
+      git("diff --cached | diff - %s", patch_path)
       git("reset")
       return self
     end,
     assert_latest_stash_matches = function(self, patch_path)
-      git("stash show -up | cmp %s", patch_path)
+      git("stash show -up | diff - %s", patch_path)
       return self
     end,
   }
@@ -167,7 +167,7 @@ describe("simple", function()
 
     vim.cmd("LazyPatcherRestore test_repo")
 
-    repo:git("stash show -up | cmp %s", test_file("00.patch"))
+    repo:git("stash show -up | diff - %s", test_file("00.patch"))
     repo:assert_empty()
     repo:assert_latest_stash_matches(test_file("00.patch"))
     assert_contents_match(patch_file("test_repo.patch.guard"), test_file("00.patch"))
@@ -346,5 +346,130 @@ describe("blacklist", function()
 
     repo:assert_no_stashes()
     repo:assert_matches_patch(test_file("00.patch"))
+  end)
+end)
+
+describe("extra_gitignore", function()
+  before_each(function()
+    vim.system({ "rm", "-rf", lazy_path, patches_path }):wait()
+    assert_not_exists(lazy_path)
+    assert_not_exists(patches_path)
+    system("mkdir -p %s %s", lazy_path, patches_path)
+  end)
+
+  it("setup", function()
+    require("lazy-patcher").setup({
+      confirm_mass_changes = false,
+      print_logs = false,
+      extra_gitignore = { smth = { "else" } },
+    })
+  end)
+
+  -- after_each(function()
+  --   check_errors()
+  --   require("lazy-patcher.logger").clear()
+  -- end)
+
+  it("with_doc_tag", function()
+    local repo = git_repo_create("test_repo")
+    repo:commit_empty():apply_patch(test_file("02_with_doc_tag.patch"))
+
+    vim.cmd("LazyPatcherRestoreAll")
+    check_errors()
+
+    repo:assert_matches_patch(test_file("03_only_doc_tag.patch"))
+    repo:assert_latest_stash_matches(test_file("00.patch"))
+
+    assert_contents_match(patch_file("test_repo.patch.guard"), test_file("00.patch"))
+
+    vim.cmd("LazyPatcherApplyAll")
+    check_errors()
+
+    repo:assert_no_stashes()
+    repo:assert_matches_patch(test_file("02_with_doc_tag.patch"))
+  end)
+
+  it("with_excludes", function()
+    local repo = git_repo_create("test_repo")
+    repo:commit_empty():apply_patch(test_file("02_with_doc_tag.patch"))
+
+    system("echo test > .git/test_excludes")
+    repo:git("config --local core.excludesFile .git/test_excludes")
+
+    vim.cmd("LazyPatcherRestoreAll")
+    check_errors()
+
+    repo:assert_matches_patch(test_file("02_with_doc_tag.patch"))
+    repo:assert_latest_stash_matches("/dev/null")
+
+    assert_not_exists(patch_file("test_repo.patch.guard"))
+
+    vim.cmd("LazyPatcherApplyAll")
+    check_errors()
+
+    repo:assert_no_stashes()
+    repo:assert_matches_patch(test_file("02_with_doc_tag.patch"))
+  end)
+end)
+
+describe("unchanged", function()
+  before_each(function()
+    vim.system({ "rm", "-rf", lazy_path, patches_path }):wait()
+    assert_not_exists(lazy_path)
+    assert_not_exists(patches_path)
+    system("mkdir -p %s %s", lazy_path, patches_path)
+  end)
+
+  it("setup", function()
+    require("lazy-patcher").setup({
+      confirm_mass_changes = false,
+      print_logs = false,
+      extra_gitignore = { smth = "else" },
+    })
+  end)
+
+  -- after_each(function()
+  --   check_errors()
+  --   require("lazy-patcher.logger").clear()
+  -- end)
+
+  it("simple", function()
+    local repo = git_repo_create("test_repo")
+    repo:commit_empty():apply_patch(test_file("00.patch"))
+    repo:commit_everything()
+    repo:assert_empty()
+
+    vim.cmd("LazyPatcherRestoreAll")
+    check_errors()
+
+    repo:assert_no_stashes()
+    repo:assert_empty()
+
+    assert_not_exists(patch_file("test_repo.patch.guard"))
+
+    vim.cmd("LazyPatcherApplyAll")
+    check_errors()
+
+    repo:assert_no_stashes()
+    repo:assert_empty()
+  end)
+
+  it("with_doc_tag", function()
+    local repo = git_repo_create("test_repo")
+    repo:commit_empty():apply_patch(test_file("03_only_doc_tag.patch"))
+
+    vim.cmd("LazyPatcherRestoreAll")
+    check_errors()
+
+    repo:assert_no_stashes()
+    repo:assert_matches_patch(test_file("03_only_doc_tag.patch"))
+
+    assert_not_exists(patch_file("test_repo.patch.guard"))
+
+    vim.cmd("LazyPatcherApplyAll")
+    check_errors()
+
+    repo:assert_no_stashes()
+    repo:assert_matches_patch(test_file("03_only_doc_tag.patch"))
   end)
 end)
