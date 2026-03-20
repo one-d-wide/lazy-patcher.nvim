@@ -83,9 +83,24 @@ function M.extra_excludes_file(opts, spec)
     return
   end
 
-  local lines = ""
   local excludes_path = resp.output:sub(1, #resp.output - 1)
-  if excludes_path ~= "" then
+  local is_optional = false
+
+  -- See setup_standard_excludes() in https://github.com/git/git/blob/master/dir.c
+  if excludes_path == "" then
+    excludes_path = (os.getenv("XDG_CONFIG_HOME") or vim.uv.os_homedir() .. "/.config") .. "/git/ignore"
+    is_optional = true
+  end
+
+  -- See git_config_pathname() in https://github.com/git/git/blob/master/config.c
+  -- We currently don't substitute "%(prefix)" and "~user"
+  local nsub
+  excludes_path, nsub = string.gsub(excludes_path, "^:%(optional%)", "")
+  is_optional = is_optional or nsub == 1
+  excludes_path, _ = string.gsub(excludes_path, "^%~", vim.uv.os_homedir())
+
+  local lines = ""
+  if not is_optional or vim.uv.fs_access(excludes_path, "r") then
     local file, err = io.open(excludes_path, "rb")
     if err == nil then
       assert(file ~= nil)
@@ -94,6 +109,7 @@ function M.extra_excludes_file(opts, spec)
     end
     if err ~= nil then
       local s = log.scope("Checking `%s`", spec.plugin_name)
+      s:set_level(vim.log.levels.WARN)
       s:log("Error reading core.excludesFile `%s`: %s", excludes_path, err)
       -- git doesn't abort here
     end
