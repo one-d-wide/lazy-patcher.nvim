@@ -2,6 +2,10 @@ local log = require("lazy-patcher.logger")
 
 ---@class LazyPatcher.Main
 ---@field tmp_file string?
+---@field lockfile_inode string?
+---@field is_stashed boolean?
+---@field is_aborted boolean?
+---@field is_sync_event boolean?
 local M = {}
 
 ---@class LazyPatcher.PatchSpec
@@ -11,6 +15,74 @@ local M = {}
 ---@field patch_guard_path string
 ---@field patch_name string
 ---@field patch_path string
+
+---@param opts LazyPatcher.Options
+---@return string
+function M.lockfile(opts)
+  return vim.fs.joinpath(opts.patches_path, "lock")
+end
+
+---@param opts LazyPatcher.Options
+---@param force boolean?
+function M.unlock(opts, force)
+  local lock = M.lockfile(opts)
+  local stat, _ = vim.uv.fs_stat(lock)
+  if stat ~= nil and (force or stat.ino == M.lockfile_inode) then
+    vim.uv.fs_unlink(lock)
+  end
+  M.lockfile_inode = nil
+end
+
+---@param opts LazyPatcher.Options
+---@param force boolean?
+---@return boolean?
+function M.lock(opts, force)
+  if not force and M.lockfile_inode ~= nil then
+    return true
+  end
+
+  local lock = M.lockfile(opts)
+  while true do
+    local fd, err = vim.uv.fs_open(lock, "wx", tonumber("644", 8))
+    if fd ~= nil then
+      local stat, _ = vim.uv.fs_fstat(fd)
+      vim.uv.fs_close(fd)
+      M.lockfile_inode = stat.ino
+      return true
+    end
+
+    local time = "(unknown)"
+    local stat, _ = vim.uv.fs_stat(lock)
+    if stat ~= nil then
+      time = os.date(nil, stat.mtime.sec)
+    end
+
+    local msg = ([[
+Lazy-patcher already has a lock on.
+
+%s
+Last touched at %s
+
+How to proceed?
+    ]]):format(err, time)
+
+    local choice = 0
+    pcall(function()
+      choice = vim.fn.confirm(msg, "&Try again\n&Recreate lockfile (dangerous!)\n&Skip stashing", 0)
+
+      -- Avoid paginating log messages
+      vim.cmd.redraw()
+    end)
+
+    if choice == 2 then
+      vim.uv.fs_unlink(lock)
+    end
+
+    if choice == 3 then
+      return
+    end
+  end
+end
 
 ---@param opts LazyPatcher.Options
 ---@param plugin_name string
@@ -509,6 +581,14 @@ function M.create_group_and_cmd(opts)
     log.print_warning()
   end, "Sure want to apply all local changes to plugins? (Might be breaking)")
 
+  vim.api.nvim_create_user_command("LazyPatcherLock", function()
+    M.lock(opts, true)
+  end, {})
+
+  vim.api.nvim_create_user_command("LazyPatcherUnlock", function()
+    M.unlock(opts, true)
+  end, {})
+
   create_action_all_cmd("LazyPatcherRestoreApplyAll", function()
     log.clear()
     pcall(function()
@@ -525,13 +605,20 @@ function M.create_group_and_cmd(opts)
     group = group_id,
     pattern = { "LazySyncPre", "LazyInstallPre", "LazyUpdatePre", "LazyCheckPre" },
     callback = function(ev)
+      M.is_sync_event = M.is_sync_event or ev.match == "LazySyncPre"
+
+      if M.is_stashed or M.is_aborted then
+        return
+      end
+
+      if not M.lock(opts) then
+        M.is_aborted = true -- TODO: do we really need to track this?
+        return
+      end
+
       log.clear()
-      if not M.sync_call then
-        M.restore_all(opts)
-      end
-      if ev.match == "LazySyncPre" then
-        M.sync_call = true
-      end
+      M.is_stashed = true
+      M.restore_all(opts)
       log.print_warning()
     end,
   })
@@ -541,12 +628,21 @@ function M.create_group_and_cmd(opts)
     group = group_id,
     pattern = { "LazySync", "LazyInstall", "LazyUpdate", "LazyCheck" },
     callback = function(ev)
-      if not M.sync_call then
-        M.apply_all(opts)
-      elseif ev.match == "LazySync" then
-        M.apply_all(opts)
-        M.sync_call = false
+      if not M.is_stashed or M.is_aborted then
+        M.is_stashed = false
+        M.is_aborted = false
+        return
       end
+
+      -- Lazy does the actual sync in between other events and LazySync
+      if M.is_sync_event and ev.match ~= "LazySync" then
+        return
+      end
+
+      M.is_stashed = false
+      M.is_sync_event = false
+      M.apply_all(opts)
+      M.unlock(opts)
       log.print_warning()
     end,
   })
