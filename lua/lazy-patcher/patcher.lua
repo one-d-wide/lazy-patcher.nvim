@@ -45,7 +45,7 @@ local git = {
   config_excludes_file = "config get --null --default= core.excludesFile",
 }
 
-function list_tbl_flatten_strings(t)
+local function list_tbl_flatten_strings(t)
   local f = function(stack)
     ::retry::
     if #stack == 0 then
@@ -68,6 +68,43 @@ function list_tbl_flatten_strings(t)
     return v
   end
   return f, { { t, nil } }
+end
+
+---@param contents string
+---@param filename string
+---@return string?
+local function create_mv_file(contents, filename)
+  local tmp = string.format("%s.tmp%08x", filename, math.random(0xffffffff))
+  local file, err = io.open(tmp, "wb")
+  if file == nil then
+    return err
+  end
+
+  _, err = file:write(contents)
+  file:close()
+  if err ~= nil then
+    vim.uv.fs_unlink(tmp)
+    return err
+  end
+
+  _, err = vim.uv.fs_rename(tmp, filename)
+  if err ~= nil then
+    return err
+  end
+end
+
+---@param filename string
+---@return string, string?
+function read_file(filename)
+  local file, err = io.open(filename, "rb")
+  if file == nil then
+    return "", err
+  end
+
+  local contents
+  contents, err = file:read("*a")
+  file:close()
+  return contents or "", err
 end
 
 ---@param opts LazyPatcher.Options
@@ -101,12 +138,8 @@ function M.extra_excludes_file(opts, spec)
 
   local lines = ""
   if not is_optional or vim.uv.fs_access(excludes_path, "r") then
-    local file, err = io.open(excludes_path, "rb")
-    if err == nil then
-      assert(file ~= nil)
-      lines, err = file:read("a")
-      file:close()
-    end
+    local err
+    lines, err = read_file(excludes_path)
     if err ~= nil then
       local s = log.scope("Checking `%s`", spec.plugin_name)
       s:set_level(vim.log.levels.WARN)
@@ -125,19 +158,15 @@ function M.extra_excludes_file(opts, spec)
     })
   end
 
-  local file, err = io.open(M.tmp_file, "wb")
-  if err ~= nil then
-    log.scope("Error writing temp file `%s` :%s", M.tmp_file, err)
-    return
-  end
-  assert(file ~= nil)
-
   for line in list_tbl_flatten_strings(opts.extra_gitignore) do
     lines = lines .. "\n" .. line
   end
 
-  file:write(lines)
-  file:close()
+  local err = create_mv_file(lines, M.tmp_file)
+  if err ~= nil then
+    log.scope("Error writing temp file `%s`: %s", M.tmp_file, err)
+    return
+  end
 
   return M.tmp_file
 end
@@ -184,14 +213,12 @@ function M.restore(opts, spec)
   end
 
   -- Save stash's diff as a new patch guard
-  local file, err = io.open(spec.patch_guard_path, "w")
-  if file == nil then
+  local err = create_mv_file(resp.output, spec.patch_guard_path)
+  if err ~= nil then
     s:log("Failed to save patch '%s': %s", spec.patch_guard_path, err)
     M.git_execute(spec.plugin_path, vim.split(git.stash_pop, " "))
     return
   end
-  file:write(resp.output)
-  file:close()
 
   s:set_ok()
   return true
@@ -213,13 +240,11 @@ function M.apply(opts, spec)
   end
 
   -- Retrieve the patch guard
-  local file, err = io.open(spec.patch_guard_path, "r")
-  if file == nil then
+  local patch, err = read_file(spec.patch_guard_path)
+  if err ~= nil then
     s:log("Failed to open a guard patch at `%s`: %s", spec.patch_guard_path, err)
     return
   end
-  local patch = file:read("*a")
-  file:close()
 
   -- Compare the stash's diff with the patch guard
   if resp.output ~= patch then
