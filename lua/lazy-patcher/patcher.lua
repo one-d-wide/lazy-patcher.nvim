@@ -2,7 +2,8 @@ local log = require("lazy-patcher.logger")
 
 ---@class LazyPatcher.Main
 ---@field tmp_file string?
----@field lockfile_inode string?
+---@field lockfile_inode integer?
+---@field lockfile_fd integer?
 ---@field is_stashed boolean?
 ---@field is_aborted boolean?
 ---@field is_sync_event boolean?
@@ -25,11 +26,21 @@ end
 ---@param opts LazyPatcher.Options
 ---@param force boolean?
 function M.unlock(opts, force)
+  if not force and M.lockfile_inode == nil then
+    return
+  end
+
   local lock = M.lockfile(opts)
   local stat, _ = vim.uv.fs_stat(lock)
   if stat ~= nil and (force or stat.ino == M.lockfile_inode) then
     vim.uv.fs_unlink(lock)
   end
+
+  if M.lockfile_fd ~= nil then
+    vim.uv.fs_close(M.lockfile_fd)
+  end
+
+  M.lockfile_fd = nil
   M.lockfile_inode = nil
 end
 
@@ -43,28 +54,31 @@ function M.lock(opts, force)
 
   local lock = M.lockfile(opts)
   while true do
-    local fd, err = vim.uv.fs_open(lock, "wx", tonumber("644", 8))
+    local fd, err, err_code = vim.uv.fs_open(lock, "wx", tonumber("644", 8))
     if fd ~= nil then
+      vim.uv.fs_write(fd, tostring(vim.uv.os_getpid()))
       local stat, _ = vim.uv.fs_fstat(fd)
-      vim.uv.fs_close(fd)
+      M.lockfile_fd = fd
       M.lockfile_inode = stat.ino
       return true
     end
 
-    local time = "(unknown)"
+    local file_err = err_code == "EEXIST" and lock or err
+    local last_pid = read_file(lock):sub(1, 20)
     local stat, _ = vim.uv.fs_stat(lock)
-    if stat ~= nil then
-      time = os.date(nil, stat.mtime.sec)
-    end
+    local time = stat and os.date(nil, stat.mtime.sec) or "(unknown)"
 
     local msg = ([[
 Lazy-patcher already has a lock on.
 
 %s
-Last touched at %s
+Last touched at %s by pid %d
+
+Try `lsof %s` to find process currently holding the lock.
+Try `ps %s` if this process is already dead, you can safely recreate the lock file."
 
 How to proceed?
-    ]]):format(err, time)
+    ]]):format(file_err, time, last_pid, lock, last_pid)
 
     local choice = 0
     pcall(function()
@@ -599,6 +613,15 @@ function M.create_group_and_cmd(opts)
     end)
     log.print_warning()
   end, "Sure want to restore/apply all local changes to plugins?")
+
+  vim.api.nvim_create_autocmd("User", {
+    desc = "Run :LazyPatcherUnlock in case something failed.",
+    group = group_id,
+    pattern = { "VimLeave" },
+    callback = function()
+      M.unlock(opts)
+    end,
+  })
 
   vim.api.nvim_create_autocmd("User", {
     desc = "Restore patches when Lazy 'Pre' events are triggered.",
